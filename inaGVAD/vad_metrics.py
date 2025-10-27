@@ -25,6 +25,7 @@
 
 import os
 import glob
+import numpy as np
 import pandas as pd
 from os.path import splitext, basename
 from pyannote.core import Annotation, Timeline, Segment
@@ -49,10 +50,20 @@ def annot2vad(annot):
 
 nonspeech = ['applause', 'noise', 'hubbub', 'jingle', 'fg_music', 'bg_music', 'respiration', 'laughers', 'other', 'empty']
 
+    
+def bootstrap(x, f, nsamples=1000):
+    stats = [f(x[np.random.randint(x.shape[0], size=x.shape[0])]) for _ in range(nsamples)]
+    stats = pd.DataFrame(stats)
+    bootstraped = stats.quantile([0.025, 0.975])
+    bootstraped.loc['mean'] = stats.mean()
+    bootstraped.loc['conf'] = bootstraped.loc[0.975] - bootstraped.loc[0.025]
+    return bootstraped
+
 class VadEval:
-    def __init__(self, collar=0.3):
+    def __init__(self, collar=0.3, num_boots=1000):
         self.da = DetectionAccuracy(collar=collar)
         self.dprf = DetectionPrecisionRecallFMeasure(collar=collar)
+        self.num_boots = num_boots
 
     def reset(self):
         self.da.reset()
@@ -114,32 +125,63 @@ class VadEval:
         lpred = ['%s/%s' % (pred_dir, basename(ref)) for ref in lref]
         return self.compare_lfiles(lref, lpred, reset=reset)
     
-    def compare_category(self, ref_dir, pred_dir, criterion, csvfname):
+    # def compare_category(self, ref_dir, pred_dir, criterion, csvfname):
 
+    #     df = pd.read_csv(csvfname)
+    #     lret = []
+    #     ldf = []
+        
+    #     for k, sdf in df.groupby(criterion):
+    #         src = sdf.fileid.map(lambda x: '%s/annotations/vad/%s.csv' % (ref_dir, x))
+    #         dst = sdf.fileid.map(lambda x: '%s/%s.csv' % (pred_dir, x))
+    #         dfdetail, dret = self.compare_lfiles(src, dst)
+    #         d = {'category': k}
+    #         d.update(dret)
+    #         dfdetail['category'] = k
+    #         ldf.append(dfdetail)
+    #         lret.append(d)
+    #         self.reset()
+    #     return pd.concat(ldf), pd.DataFrame.from_dict(lret)
+
+    # def compare_csvset(self, ref_dir, pred_dir, csvfname):
+
+    #     df = pd.read_csv(csvfname)
+    #     src = df.fileid.map(lambda x: '%s/annotations/vad/%s.csv' % (ref_dir, x))
+    #     dst = df.fileid.map(lambda x: '%s/%s.csv' % (pred_dir, x))
+    #     dfdetail, dret = self.compare_lfiles(src, dst)
+    #     self.reset()
+    #     return dfdetail, dret
+
+    def compare_csvset(self, ref_dir, pred_dir, csvfname):
         df = pd.read_csv(csvfname)
-        lret = []
-        ldf = []
+        src = df.fileid.map(lambda x: '%s/annotations/vad/%s.csv' % (ref_dir, x))
+        dst = df.fileid.map(lambda x: '%s/%s.csv' % (pred_dir, x))
+    
+        x = np.array(list(src.index))
+        def function(index):
+            dfdetail, dret = self.compare_lfiles(src.loc[index], dst.loc[index])
+            self.reset()
+            return dret
+    
+        return bootstrap(x, function, self.num_boots)
+    
+    def compare_category(self, ref_dir, pred_dir, criterion, csvfname):
+        df = pd.read_csv(csvfname)
+        results = {}
         
         for k, sdf in df.groupby(criterion):
             src = sdf.fileid.map(lambda x: '%s/annotations/vad/%s.csv' % (ref_dir, x))
             dst = sdf.fileid.map(lambda x: '%s/%s.csv' % (pred_dir, x))
-            dfdetail, dret = self.compare_lfiles(src, dst)
-            d = {'category': k}
-            d.update(dret)
-            dfdetail['category'] = k
-            ldf.append(dfdetail)
-            lret.append(d)
-            self.reset()
-        return pd.concat(ldf), pd.DataFrame.from_dict(lret)
-
-    def compare_csvset(self, ref_dir, pred_dir, csvfname):
-
-        df = pd.read_csv(csvfname)
-        src = df.fileid.map(lambda x: '%s/annotations/vad/%s.csv' % (ref_dir, x))
-        dst = df.fileid.map(lambda x: '%s/%s.csv' % (pred_dir, x))
-        dfdetail, dret = self.compare_lfiles(src, dst)
-        self.reset()
-        return dfdetail, dret
+            
+            def function(index):
+                dfdetail, dret = self.compare_lfiles(src.loc[index], dst.loc[index])
+                self.reset()
+                return dret
+    
+            x = np.array(list(src.index))
+            results[k] = bootstrap(x, function, self.num_boots)
+    
+        return results
         
     def false_alarm_analysis(self, ref_dir, pred_dir, csvfname):
         df = pd.read_csv(csvfname)
